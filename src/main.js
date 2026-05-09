@@ -65,7 +65,7 @@ document.querySelector('#app').innerHTML = `
           <div class="dropdown-menu" id="filterMenu">
             <button data-value="gainers" class="active">🔥 Top Gainers</button>
             <button data-value="losers">📉 Top Losers</button>
-            <button data-value="mcap">ðŸ’Ž Market Cap</button>
+            <button data-value="mcap">💎 Market Cap</button>
             <button data-value="lowcap">🔬 Low Cap Gems</button>
             <button data-value="newest">🆕 New Launches</button>
             <button data-value="volume">📈 Volume</button>
