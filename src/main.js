@@ -717,7 +717,7 @@ function selectToken(token) {
   }).join('');
 
   drawer.innerHTML = `
-    <button class="close" aria-label="Close">âœ•</button>
+    <button class="close" aria-label="Close"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 2l12 12M14 2L2 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
     <div class="tokenHead">
       <div class="avatar">${imageUrl ? `<img src="${imageUrl}" alt="">` : token.symbol.slice(0, 3)}</div>
       <div>
