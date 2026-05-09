@@ -484,23 +484,36 @@ function fitText(text, maxWidth, maxSize, minSize = 10) {
   return size;
 }
 
-function drawCanvas() {
-  // Cap DPR at 1.5 on mobile — 3x screens draw 4.5x pixels, causes major lag
-  const isMobile = window.innerWidth <= 860;
-  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
-  const bounds = canvas.getBoundingClientRect();
-  canvas.width = Math.floor(bounds.width * dpr);
-  canvas.height = Math.floor(bounds.height * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, bounds.width, bounds.height);
+// --- Offscreen canvas cache for smooth pan/zoom ---
+let _offscreen = null;
+let _offCtx = null;
+let _cacheW = 0, _cacheH = 0;
+let _cacheDirty = true;
+
+function invalidateCanvasCache() { _cacheDirty = true; }
+
+function rebuildCanvasCache() {
   const world = worldBounds();
   const tokens = visibleTokens();
   const items = tokens.map(token => ({ token, weight: sizeValue(token) })).sort((a, b) => b.weight - a.weight);
   state.rects = layoutTreemap(items, 0, 0, world.width, world.height);
 
-  ctx.save();
-  ctx.translate(state.view.x, state.view.y);
-  ctx.scale(state.view.scale, state.view.scale);
+  // Size offscreen to world bounds (capped to avoid huge allocations)
+  const maxDim = 2048;
+  _cacheW = Math.min(maxDim, Math.ceil(world.width));
+  _cacheH = Math.min(maxDim, Math.ceil(world.height));
+  if (!_offscreen) {
+    _offscreen = document.createElement('canvas');
+    _offCtx = _offscreen.getContext('2d');
+  }
+  _offscreen.width = _cacheW;
+  _offscreen.height = _cacheH;
+
+  // Scale factor if world exceeds maxDim
+  const sx = _cacheW / world.width;
+  const sy = _cacheH / world.height;
+  _offCtx.setTransform(sx, 0, 0, sy, 0, 0);
+  _offCtx.clearRect(0, 0, world.width, world.height);
 
   for (const rect of state.rects) {
     const token = rect.token;
@@ -510,8 +523,7 @@ function drawCanvas() {
     if (w < 10 || h < 10) continue;
     const radius = Math.min(32, Math.min(w, h) * 0.15);
     
-    // Fill background
-    const grad = ctx.createLinearGradient(x, y, x, y + h);
+    const grad = _offCtx.createLinearGradient(x, y, x, y + h);
     if (change >= 0) {
       grad.addColorStop(0, 'rgba(50, 215, 75, 0.2)');
       grad.addColorStop(1, 'rgba(50, 215, 75, 0.05)');
@@ -520,70 +532,111 @@ function drawCanvas() {
       grad.addColorStop(1, 'rgba(255, 69, 58, 0.05)');
     }
     
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, radius);
-    ctx.fillStyle = grad;
-    ctx.fill();
+    _offCtx.beginPath();
+    _offCtx.roundRect(x, y, w, h, radius);
+    _offCtx.fillStyle = grad;
+    _offCtx.fill();
     
-    ctx.strokeStyle = state.selected?.id === token.id ? '#ffffff' : 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = state.selected?.id === token.id ? 3 : 1;
-    ctx.stroke();
+    _offCtx.strokeStyle = state.selected?.id === token.id ? '#ffffff' : 'rgba(255,255,255,0.1)';
+    _offCtx.lineWidth = state.selected?.id === token.id ? 3 : 1;
+    _offCtx.stroke();
 
-    // Top subtle highlight for glass effect
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, Math.max(radius, h * 0.4), radius);
-    const glass = ctx.createLinearGradient(x, y, x, y + h * 0.4);
+    _offCtx.beginPath();
+    _offCtx.roundRect(x, y, w, Math.max(radius, h * 0.4), radius);
+    const glass = _offCtx.createLinearGradient(x, y, x, y + h * 0.4);
     glass.addColorStop(0, 'rgba(255,255,255,0.1)');
     glass.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = glass;
-    ctx.fill();
+    _offCtx.fillStyle = glass;
+    _offCtx.fill();
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, radius);
-    ctx.clip();
+    _offCtx.save();
+    _offCtx.beginPath();
+    _offCtx.roundRect(x, y, w, h, radius);
+    _offCtx.clip();
 
     const iconSize = Math.min(64, Math.max(28, Math.min(w * .25, h * .3)));
-    if (w > 64 && h > 64) drawIcon(token, x + 16, y + 16, iconSize);
+    if (w > 64 && h > 64) {
+      // Draw icon directly on offscreen
+      const img = state.images.get(token.id);
+      if (img) {
+        _offCtx.save();
+        _offCtx.beginPath();
+        _offCtx.arc(x + 16 + iconSize / 2, y + 16 + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+        _offCtx.clip();
+        _offCtx.drawImage(img, x + 16, y + 16, iconSize, iconSize);
+        _offCtx.restore();
+      } else {
+        _offCtx.fillStyle = 'rgba(255,255,255,0.1)';
+        _offCtx.beginPath();
+        _offCtx.arc(x + 16 + iconSize / 2, y + 16 + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+        _offCtx.fill();
+      }
+    }
     
     const tx = x + (w > 100 && h > 64 ? iconSize + 28 : 16);
     const available = Math.max(20, w - (tx - x) - 16);
     const symbol = token.symbol.slice(0, 9);
     
-    ctx.fillStyle = '#fff';
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
+    _offCtx.fillStyle = '#fff';
+    _offCtx.textBaseline = 'top';
+    _offCtx.textAlign = 'left';
     
     const titleSize = fitText(symbol, available, Math.min(36, Math.max(14, w / 7)), 10);
-    ctx.font = `700 ${titleSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+    _offCtx.font = `700 ${titleSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
     
     if (w > 70 && h > 48) {
-      ctx.shadowColor = 'rgba(0,0,0,0.5)';
-      ctx.shadowBlur = 4;
-      ctx.shadowOffsetY = 1;
-      ctx.fillText(symbol, tx, y + (w > 100 && h > 64 ? 20 : 16), available);
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetY = 0;
-      ctx.shadowColor = 'transparent';
+      _offCtx.shadowColor = 'rgba(0,0,0,0.5)';
+      _offCtx.shadowBlur = 4;
+      _offCtx.shadowOffsetY = 1;
+      _offCtx.fillText(symbol, tx, y + (w > 100 && h > 64 ? 20 : 16), available);
+      _offCtx.shadowBlur = 0;
+      _offCtx.shadowOffsetY = 0;
+      _offCtx.shadowColor = 'transparent';
     }
     
     if (w > 90 && h > 90) {
       const bodyY = y + (w > 100 && h > 64 ? iconSize + 28 : 50);
       const pctSize = Math.min(40, Math.max(16, Math.min(w / 6, h / 8)));
-      ctx.font = `600 ${pctSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
-      ctx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
-      ctx.fillText(pct(change), x + 16, bodyY, w - 32);
+      _offCtx.font = `600 ${pctSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+      _offCtx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
+      _offCtx.fillText(pct(change), x + 16, bodyY, w - 32);
       
-      ctx.font = `500 ${Math.min(18, Math.max(11, pctSize * .45))}px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif`;
-      ctx.fillStyle = 'rgba(255,255,255,.6)';
-      ctx.fillText(`${fmtUsd(token.marketCap || token.fdv)} \u00B7 ${ageLabel(token.pairCreatedAt)}`, x + 16, bodyY + pctSize + 8, w - 32);
+      _offCtx.font = `500 ${Math.min(18, Math.max(11, pctSize * .45))}px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif`;
+      _offCtx.fillStyle = 'rgba(255,255,255,.6)';
+      _offCtx.fillText(`${fmtUsd(token.marketCap || token.fdv)} \u00B7 ${ageLabel(token.pairCreatedAt)}`, x + 16, bodyY + pctSize + 8, w - 32);
     } else if (w > 54 && h > 64) {
-      ctx.font = `600 ${Math.min(18, Math.max(11, w / 6))}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
-      ctx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
-      ctx.fillText(pct(change), x + 12, y + (w > 100 && h > 64 ? 20 + titleSize + 4 : 40), w - 24);
+      _offCtx.font = `600 ${Math.min(18, Math.max(11, w / 6))}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+      _offCtx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
+      _offCtx.fillText(pct(change), x + 12, y + (w > 100 && h > 64 ? 20 + titleSize + 4 : 40), w - 24);
     }
-    ctx.restore();
+    _offCtx.restore();
   }
+  _cacheDirty = false;
+}
+
+function drawCanvas() {
+  // Rebuild offscreen cache if data changed (NOT during pan/zoom)
+  if (_cacheDirty || !_offscreen) rebuildCanvasCache();
+
+  const isMobile = window.innerWidth <= 860;
+  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+  const bounds = canvas.getBoundingClientRect();
+  const newW = Math.floor(bounds.width * dpr);
+  const newH = Math.floor(bounds.height * dpr);
+  if (canvas.width !== newW || canvas.height !== newH) {
+    canvas.width = newW;
+    canvas.height = newH;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, bounds.width, bounds.height);
+
+  // Fast blit: just draw the cached offscreen canvas with current pan/zoom transform
+  const world = worldBounds();
+  ctx.save();
+  ctx.translate(state.view.x, state.view.y);
+  ctx.scale(state.view.scale, state.view.scale);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(_offscreen, 0, 0, world.width, world.height);
   ctx.restore();
 }
 
@@ -1115,7 +1168,7 @@ function bindControls() {
   let _touches = {};
   let _pinchDist0 = null;
   let _pinchScale0 = null;
-  let _pinchMidX = 0, _pinchMidY = 0;
+  // World-space anchor: the world point that was under the midpoint when the pinch started
   let _pinchWorldX = 0, _pinchWorldY = 0;
   let _touchMoved = false;
 
@@ -1123,23 +1176,25 @@ function bindControls() {
     e.preventDefault();
     for (const t of e.changedTouches) _touches[t.identifier] = { x: t.clientX, y: t.clientY };
     const ids = Object.keys(_touches);
+
     if (ids.length === 2) {
+      // Starting a pinch — record world-space anchor at current midpoint
       const t1 = _touches[ids[0]], t2 = _touches[ids[1]];
       _pinchDist0 = Math.hypot(t2.x - t1.x, t2.y - t1.y);
       _pinchScale0 = state.view.scale;
       const rect = canvas.getBoundingClientRect();
-      _pinchMidX = (t1.x + t2.x) / 2 - rect.left;
-      _pinchMidY = (t1.y + t2.y) / 2 - rect.top;
-      const world = screenToWorld(_pinchMidX, _pinchMidY);
+      const midX = (t1.x + t2.x) / 2 - rect.left;
+      const midY = (t1.y + t2.y) / 2 - rect.top;
+      const world = screenToWorld(midX, midY);
       _pinchWorldX = world.x;
       _pinchWorldY = world.y;
-    }
-    _touchMoved = false;
-    state.view.dragging = ids.length === 1;
-    if (ids.length === 1) {
+      state.view.dragging = false;
+    } else if (ids.length === 1) {
+      state.view.dragging = true;
       state.view.lastX = e.changedTouches[0].clientX;
       state.view.lastY = e.changedTouches[0].clientY;
     }
+    _touchMoved = false;
   }, { passive: false });
 
   // rAF flag — ensures drawCanvas fires at most once per animation frame
@@ -1155,19 +1210,25 @@ function bindControls() {
     for (const t of e.changedTouches) _touches[t.identifier] = { x: t.clientX, y: t.clientY };
     const ids = Object.keys(_touches);
     _touchMoved = true;
-    if (ids.length === 2) {
-      // Pinch zoom — update state immediately, draw once per frame
+
+    if (ids.length === 2 && _pinchDist0 > 0) {
       const t1 = _touches[ids[0]], t2 = _touches[ids[1]];
       const dist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
-      if (_pinchDist0 && _pinchDist0 > 0) {
-        const newScale = Math.min(5, Math.max(.25, _pinchScale0 * (dist / _pinchDist0)));
-        state.view.scale = newScale;
-        state.view.x = _pinchMidX - _pinchWorldX * newScale;
-        state.view.y = _pinchMidY - _pinchWorldY * newScale;
-        _scheduleCanvasDraw();
-      }
+      const newScale = Math.min(5, Math.max(.25, _pinchScale0 * (dist / _pinchDist0)));
+
+      // KEY FIX: use the CURRENT midpoint between fingers (not the locked start midpoint)
+      // This prevents drift when fingers slide sideways while pinching
+      const rect = canvas.getBoundingClientRect();
+      const curMidX = (t1.x + t2.x) / 2 - rect.left;
+      const curMidY = (t1.y + t2.y) / 2 - rect.top;
+
+      // Pin _pinchWorldX/Y under curMid at the new scale
+      state.view.scale = newScale;
+      state.view.x = curMidX - _pinchWorldX * newScale;
+      state.view.y = curMidY - _pinchWorldY * newScale;
+      _scheduleCanvasDraw();
+
     } else if (ids.length === 1 && state.view.dragging) {
-      // Single finger pan
       const t = e.changedTouches[0];
       state.view.x += t.clientX - state.view.lastX;
       state.view.y += t.clientY - state.view.lastY;
@@ -1181,14 +1242,22 @@ function bindControls() {
     e.preventDefault();
     for (const t of e.changedTouches) delete _touches[t.identifier];
     const ids = Object.keys(_touches);
-    state.view.dragging = ids.length === 1;
-    if (!_touchMoved && e.changedTouches.length === 1) {
-      // Tap to select
-      const t = e.changedTouches[0];
-      const hit = canvasHit(t.clientX, t.clientY);
-      if (hit) selectToken(hit.token);
-    }
     _pinchDist0 = null;
+
+    if (ids.length === 1) {
+      // 2→1 finger: reset pan origin to remaining finger so there's no jump
+      const remaining = _touches[ids[0]];
+      state.view.lastX = remaining.x;
+      state.view.lastY = remaining.y;
+      state.view.dragging = true;
+    } else {
+      state.view.dragging = false;
+      if (!_touchMoved && e.changedTouches.length === 1) {
+        const t = e.changedTouches[0];
+        const hit = canvasHit(t.clientX, t.clientY);
+        if (hit) selectToken(hit.token);
+      }
+    }
   }, { passive: false });
   // --- End touch pinch-to-zoom ---
 
@@ -1232,8 +1301,10 @@ function render() {
   const isCanvas = state.mode === 'canvas';
   canvas.hidden = !isCanvas;
   globeMount.hidden = isCanvas;
-  if (isCanvas) drawCanvas();
-  else {
+  if (isCanvas) {
+    invalidateCanvasCache(); // data/filter/metric changed — rebuild offscreen on next draw
+    drawCanvas();
+  } else {
     rebuildGlobe();
     requestAnimationFrame(() => state.globe?.renderer.render(state.globe.scene, state.globe.camera));
   }
