@@ -61,18 +61,18 @@ document.querySelector('#app').innerHTML = `
         </div>
         <label class="field"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg><input id="minMc" inputmode="numeric" placeholder="Min MC"></label>
         <div class="dropdown" id="filterWrap">
-          <button class="dropdown-toggle" id="filterBtn">ðŸ”¥ Top Gainers<svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="dropdown-toggle" id="filterBtn">🔥 Top Gainers<svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div class="dropdown-menu" id="filterMenu">
-            <button data-value="gainers" class="active">ðŸ”¥ Top Gainers</button>
-            <button data-value="losers">ðŸ“‰ Top Losers</button>
+            <button data-value="gainers" class="active">🔥 Top Gainers</button>
+            <button data-value="losers">📉 Top Losers</button>
             <button data-value="mcap">ðŸ’Ž Market Cap</button>
-            <button data-value="lowcap">ðŸ”¬ Low Cap Gems</button>
-            <button data-value="newest">ðŸ†• New Launches</button>
-            <button data-value="volume">ðŸ“ˆ Volume</button>
-            <button data-value="liquidity">ðŸ’§ Liquidity</button>
+            <button data-value="lowcap">🔬 Low Cap Gems</button>
+            <button data-value="newest">🆕 New Launches</button>
+            <button data-value="volume">📈 Volume</button>
+            <button data-value="liquidity">💧 Liquidity</button>
           </div>
         </div>
-        <button id="resetView" class="ghost">âŸ³ Reset</button>
+        <button id="resetView" class="ghost">⟳ Reset</button>
       </div>
     </header>
     <section class="stage">
@@ -111,7 +111,11 @@ function parseMoney(value) {
 
 function pct(value) {
   if (!Number.isFinite(value)) return 'n/a';
-  return `${value > 0 ? '+' : ''}${value.toFixed(Math.abs(value) > 99 ? 0 : 1)}%`;
+  const abs = Math.abs(value);
+  const sign = value > 0 ? '+' : '';
+  if (abs >= 1e6) return `${sign}${(value / 1e6).toFixed(1)}M%`;
+  if (abs >= 1e4) return `${sign}${(value / 1e3).toFixed(0)}K%`;
+  return `${sign}${value.toFixed(abs > 99 ? 0 : 1)}%`;
 }
 
 function ageLabel(ms) {
@@ -907,9 +911,13 @@ function bindControls() {
   }, { passive: false });
   // --- End touch pinch-to-zoom ---
 
+  let _dragStartX = 0, _dragStartY = 0, _didDrag = false;
   canvas.addEventListener('pointerdown', e => {
     if (e.pointerType === 'touch') return; // handled by touch events
     state.view.dragging = true;
+    _didDrag = false;
+    _dragStartX = e.clientX;
+    _dragStartY = e.clientY;
     state.view.lastX = e.clientX;
     state.view.lastY = e.clientY;
     canvas.setPointerCapture(e.pointerId);
@@ -921,6 +929,9 @@ function bindControls() {
   canvas.addEventListener('pointermove', e => {
     if (e.pointerType === 'touch') return;
     if (state.view.dragging) {
+      const dx = e.clientX - _dragStartX;
+      const dy = e.clientY - _dragStartY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) _didDrag = true;
       state.view.x += e.clientX - state.view.lastX;
       state.view.y += e.clientY - state.view.lastY;
       state.view.lastX = e.clientX;
@@ -935,7 +946,7 @@ function bindControls() {
   canvas.addEventListener('mouseleave', () => { hoverTag.hidden = true; });
   canvas.addEventListener('click', e => {
     if (e.pointerType === 'touch') return;
-    if (Math.abs(e.clientX - state.view.lastX) > 3 || Math.abs(e.clientY - state.view.lastY) > 3) return;
+    if (_didDrag) return;
     const hit = canvasHit(e.clientX, e.clientY);
     if (hit) selectToken(hit.token);
   });

@@ -1,4 +1,4 @@
-* { box-sizing: border-box; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 [hidden] { display: none !important; }
 html, body, #app { width: 100%; height: 100%; margin: 0; }
 body {
@@ -209,20 +209,17 @@ select {
   -webkit-backdrop-filter: blur(20px);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
 }
-#mapCanvas, #globeMount {
+.stage:has(#tokenTable:not([hidden])) {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+#mapCanvas {
   width: 100%;
   height: 100%;
   display: block;
 }
 #mapCanvas { cursor: grab; }
 #mapCanvas:active { cursor: grabbing; }
-#globeMount {
-  background:
-    radial-gradient(circle at 50% 50%, rgba(49,183,255,.15), transparent 60%),
-    transparent;
-}
-#globeMount canvas { display: block; cursor: grab; }
-#globeMount canvas:active { cursor: grabbing; }
 #hoverTag {
   position: fixed;
   z-index: 8;
@@ -786,10 +783,10 @@ td.tbl-token {
 }
 
 @media (max-width: 540px) {
-  .tbl { min-width: 360px; font-size: 12px; }
-  .tbl th, .tbl td { padding: 8px 8px; }
+  .tbl { min-width: unset; font-size: 12px; }
+  .tbl th, .tbl td { padding: 8px 6px; }
   .tbl-logo, .tbl-logo-placeholder { width: 28px; height: 28px; }
   .tbl-sym { font-size: 12px; }
-  .tbl-mc { display: none; }
-  .tbl th.tbl-mc { display: none; }
+  .tbl-chg { width: auto; min-width: 52px; font-size: 11px; }
+  .tbl-mc { font-size: 11px; width: auto; min-width: 60px; }
 }
