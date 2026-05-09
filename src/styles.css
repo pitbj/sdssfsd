@@ -15,7 +15,7 @@ button, select, input { font: inherit; }
 .shell {
   display: grid;
   grid-template-rows: auto 1fr;
-  min-height: 100dvh;
+  height: 100dvh;
   background: transparent;
 }
 .topbar {
