@@ -742,7 +742,12 @@ function selectToken(token) {
       <button id="copyAddr">copy</button>
     </div>
   `;
-  drawer.querySelector('.close').onclick = () => drawer.classList.remove('open');
+  drawer.querySelector('.close').onclick = () => {
+    drawer.classList.remove('open');
+    state.selected = null;
+    if (state.mode === 'canvas') drawCanvas();
+    else if (state.mode === 'table') renderTable();
+  };
   drawer.querySelector('#copyAddr').onclick = async () => {
     try {
       await navigator.clipboard.writeText(token.address);
