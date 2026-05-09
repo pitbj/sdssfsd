@@ -87,6 +87,7 @@ document.querySelector('#app').innerHTML = `
 const canvas = document.querySelector('#mapCanvas');
 const ctx = canvas.getContext('2d');
 const tokenTable = document.querySelector('#tokenTable');
+const stage = document.querySelector('.stage');
 const statusEl = document.querySelector('#status');
 const drawer = document.querySelector('#drawer');
 const hoverTag = document.querySelector('#hoverTag');
@@ -647,7 +648,6 @@ function renderTable() {
             <span class="tbl-name">${token.name.slice(0, 20)}</span>
           </div>
         </td>
-        ${col(token.priceChange?.m5, 'm5')}
         ${col(token.priceChange?.h1, 'h1')}
         ${col(token.priceChange?.h6, 'h6')}
         ${col(token.priceChange?.h24, 'h24')}
@@ -661,7 +661,6 @@ function renderTable() {
         <tr>
           <th class="tbl-rank">#</th>
           <th class="tbl-token">Token</th>
-          <th class="tbl-chg${state.metric === 'm5' ? ' tbl-active-col' : ''}">5m</th>
           <th class="tbl-chg${state.metric === 'h1' ? ' tbl-active-col' : ''}">1h</th>
           <th class="tbl-chg${state.metric === 'h6' ? ' tbl-active-col' : ''}">6h</th>
           <th class="tbl-chg${state.metric === 'h24' ? ' tbl-active-col' : ''}">24h</th>
@@ -959,6 +958,7 @@ function render() {
   const isTable  = state.mode === 'table';
   canvas.hidden     = !isCanvas;
   tokenTable.hidden = !isTable;
+  stage.classList.toggle('table-mode', isTable);
   if (isCanvas) {
     invalidateCanvasCache();
     drawCanvas();
