@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import './styles.css';
 
 const CACHE_KEY = 'ton-meme-map.tokens.v2';
@@ -32,9 +31,7 @@ const state = {
   images: new Map(),
   imageUrls: new Map(),
   failedImages: new Set(),
-  view: { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 },
-  globe: null,
-  needsGlobeRefresh: false
+  view: { scale: 1, x: 0, y: 0, dragging: false, lastX: 0, lastY: 0 }
 };
 
 const KNOWN_TOKEN_IMAGES = {
@@ -54,7 +51,7 @@ document.querySelector('#app').innerHTML = `
       <div class="controls">
         <div class="seg" data-control="mode">
           <button class="active" data-value="canvas">Canvas</button>
-          <button data-value="globe">Bubbles</button>
+          <button data-value="table">Table</button>
         </div>
         <div class="seg" data-control="metric">
           <button data-value="m5">5m</button>
@@ -64,23 +61,23 @@ document.querySelector('#app').innerHTML = `
         </div>
         <label class="field"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg><input id="minMc" inputmode="numeric" placeholder="Min MC"></label>
         <div class="dropdown" id="filterWrap">
-          <button class="dropdown-toggle" id="filterBtn">🔥 Top Gainers<svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="dropdown-toggle" id="filterBtn">ðŸ”¥ Top Gainers<svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div class="dropdown-menu" id="filterMenu">
-            <button data-value="gainers" class="active">🔥 Top Gainers</button>
-            <button data-value="losers">📉 Top Losers</button>
-            <button data-value="mcap">💎 Market Cap</button>
-            <button data-value="lowcap">🔬 Low Cap Gems</button>
-            <button data-value="newest">🆕 New Launches</button>
-            <button data-value="volume">📈 Volume</button>
-            <button data-value="liquidity">💧 Liquidity</button>
+            <button data-value="gainers" class="active">ðŸ”¥ Top Gainers</button>
+            <button data-value="losers">ðŸ“‰ Top Losers</button>
+            <button data-value="mcap">ðŸ’Ž Market Cap</button>
+            <button data-value="lowcap">ðŸ”¬ Low Cap Gems</button>
+            <button data-value="newest">ðŸ†• New Launches</button>
+            <button data-value="volume">ðŸ“ˆ Volume</button>
+            <button data-value="liquidity">ðŸ’§ Liquidity</button>
           </div>
         </div>
-        <button id="resetView" class="ghost">⟳ Reset</button>
+        <button id="resetView" class="ghost">âŸ³ Reset</button>
       </div>
     </header>
     <section class="stage">
       <canvas id="mapCanvas"></canvas>
-      <div id="globeMount" hidden></div>
+      <div id="tokenTable" class="token-table" hidden></div>
       <div id="hoverTag" hidden></div>
     </section>
     <aside id="drawer" class="drawer" aria-live="polite"></aside>
@@ -89,7 +86,7 @@ document.querySelector('#app').innerHTML = `
 
 const canvas = document.querySelector('#mapCanvas');
 const ctx = canvas.getContext('2d');
-const globeMount = document.querySelector('#globeMount');
+const tokenTable = document.querySelector('#tokenTable');
 const statusEl = document.querySelector('#status');
 const drawer = document.querySelector('#drawer');
 const hoverTag = document.querySelector('#hoverTag');
@@ -345,7 +342,7 @@ function loadTokenImages(tokens) {
       KNOWN_TOKEN_IMAGES[String(token.symbol || '').toLowerCase()],
       token.address ? `https://dd.dexscreener.com/ds-data/tokens/ton/${token.address}.png?size=lg` : ''
     ].filter(Boolean);
-    // Always proxy every URL — canvas requires CORS headers
+    // Always proxy every URL â€” canvas requires CORS headers
     token.imageCandidates = [...new Set(sources.map(u => proxiedImageUrl(u)).filter(Boolean))];
 
     if (!token.imageCandidates.length) continue;
@@ -484,36 +481,38 @@ function fitText(text, maxWidth, maxSize, minSize = 10) {
   return size;
 }
 
-// --- Offscreen canvas cache for smooth pan/zoom ---
-let _offscreen = null;
-let _offCtx = null;
-let _cacheW = 0, _cacheH = 0;
-let _cacheDirty = true;
+// Layout cache â€” only recalculate treemap when data changes, not on every pan/zoom
+let _layoutDirty = true;
+function invalidateCanvasCache() { _layoutDirty = true; }
 
-function invalidateCanvasCache() { _cacheDirty = true; }
-
-function rebuildCanvasCache() {
-  const world = worldBounds();
-  const tokens = visibleTokens();
-  const items = tokens.map(token => ({ token, weight: sizeValue(token) })).sort((a, b) => b.weight - a.weight);
-  state.rects = layoutTreemap(items, 0, 0, world.width, world.height);
-
-  // Size offscreen to world bounds (capped to avoid huge allocations)
-  const maxDim = 2048;
-  _cacheW = Math.min(maxDim, Math.ceil(world.width));
-  _cacheH = Math.min(maxDim, Math.ceil(world.height));
-  if (!_offscreen) {
-    _offscreen = document.createElement('canvas');
-    _offCtx = _offscreen.getContext('2d');
+function drawCanvas() {
+  const isMobile = window.innerWidth <= 860;
+  // Full DPR for sharp rendering â€” the lag fix is caching layout, not reducing quality
+  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 2 : 3);
+  const bounds = canvas.getBoundingClientRect();
+  const newW = Math.floor(bounds.width * dpr);
+  const newH = Math.floor(bounds.height * dpr);
+  if (canvas.width !== newW || canvas.height !== newH) {
+    canvas.width = newW;
+    canvas.height = newH;
+    _layoutDirty = true; // viewport changed, redo layout
   }
-  _offscreen.width = _cacheW;
-  _offscreen.height = _cacheH;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, bounds.width, bounds.height);
 
-  // Scale factor if world exceeds maxDim
-  const sx = _cacheW / world.width;
-  const sy = _cacheH / world.height;
-  _offCtx.setTransform(sx, 0, 0, sy, 0, 0);
-  _offCtx.clearRect(0, 0, world.width, world.height);
+  // Only recalculate treemap layout when data/filter/metric changed
+  if (_layoutDirty || !state.rects) {
+    const world = worldBounds();
+    const tokens = visibleTokens();
+    const items = tokens.map(token => ({ token, weight: sizeValue(token) })).sort((a, b) => b.weight - a.weight);
+    state.rects = layoutTreemap(items, 0, 0, world.width, world.height);
+    _layoutDirty = false;
+  }
+
+  const world = worldBounds();
+  ctx.save();
+  ctx.translate(state.view.x, state.view.y);
+  ctx.scale(state.view.scale, state.view.scale);
 
   for (const rect of state.rects) {
     const token = rect.token;
@@ -523,7 +522,7 @@ function rebuildCanvasCache() {
     if (w < 10 || h < 10) continue;
     const radius = Math.min(32, Math.min(w, h) * 0.15);
     
-    const grad = _offCtx.createLinearGradient(x, y, x, y + h);
+    const grad = ctx.createLinearGradient(x, y, x, y + h);
     if (change >= 0) {
       grad.addColorStop(0, 'rgba(50, 215, 75, 0.2)');
       grad.addColorStop(1, 'rgba(50, 215, 75, 0.05)');
@@ -531,45 +530,43 @@ function rebuildCanvasCache() {
       grad.addColorStop(0, 'rgba(255, 69, 58, 0.2)');
       grad.addColorStop(1, 'rgba(255, 69, 58, 0.05)');
     }
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.fillStyle = grad;
+    ctx.fill();
     
-    _offCtx.beginPath();
-    _offCtx.roundRect(x, y, w, h, radius);
-    _offCtx.fillStyle = grad;
-    _offCtx.fill();
-    
-    _offCtx.strokeStyle = state.selected?.id === token.id ? '#ffffff' : 'rgba(255,255,255,0.1)';
-    _offCtx.lineWidth = state.selected?.id === token.id ? 3 : 1;
-    _offCtx.stroke();
+    ctx.strokeStyle = state.selected?.id === token.id ? '#ffffff' : 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = state.selected?.id === token.id ? 3 : 1;
+    ctx.stroke();
 
-    _offCtx.beginPath();
-    _offCtx.roundRect(x, y, w, Math.max(radius, h * 0.4), radius);
-    const glass = _offCtx.createLinearGradient(x, y, x, y + h * 0.4);
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, Math.max(radius, h * 0.4), radius);
+    const glass = ctx.createLinearGradient(x, y, x, y + h * 0.4);
     glass.addColorStop(0, 'rgba(255,255,255,0.1)');
     glass.addColorStop(1, 'rgba(255,255,255,0)');
-    _offCtx.fillStyle = glass;
-    _offCtx.fill();
+    ctx.fillStyle = glass;
+    ctx.fill();
 
-    _offCtx.save();
-    _offCtx.beginPath();
-    _offCtx.roundRect(x, y, w, h, radius);
-    _offCtx.clip();
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.clip();
 
     const iconSize = Math.min(64, Math.max(28, Math.min(w * .25, h * .3)));
     if (w > 64 && h > 64) {
-      // Draw icon directly on offscreen
       const img = state.images.get(token.id);
       if (img) {
-        _offCtx.save();
-        _offCtx.beginPath();
-        _offCtx.arc(x + 16 + iconSize / 2, y + 16 + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
-        _offCtx.clip();
-        _offCtx.drawImage(img, x + 16, y + 16, iconSize, iconSize);
-        _offCtx.restore();
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x + 16 + iconSize / 2, y + 16 + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(img, x + 16, y + 16, iconSize, iconSize);
+        ctx.restore();
       } else {
-        _offCtx.fillStyle = 'rgba(255,255,255,0.1)';
-        _offCtx.beginPath();
-        _offCtx.arc(x + 16 + iconSize / 2, y + 16 + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
-        _offCtx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.beginPath();
+        ctx.arc(x + 16 + iconSize / 2, y + 16 + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
     
@@ -577,460 +574,113 @@ function rebuildCanvasCache() {
     const available = Math.max(20, w - (tx - x) - 16);
     const symbol = token.symbol.slice(0, 9);
     
-    _offCtx.fillStyle = '#fff';
-    _offCtx.textBaseline = 'top';
-    _offCtx.textAlign = 'left';
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
     
     const titleSize = fitText(symbol, available, Math.min(36, Math.max(14, w / 7)), 10);
-    _offCtx.font = `700 ${titleSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+    ctx.font = `700 ${titleSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
     
     if (w > 70 && h > 48) {
-      _offCtx.shadowColor = 'rgba(0,0,0,0.5)';
-      _offCtx.shadowBlur = 4;
-      _offCtx.shadowOffsetY = 1;
-      _offCtx.fillText(symbol, tx, y + (w > 100 && h > 64 ? 20 : 16), available);
-      _offCtx.shadowBlur = 0;
-      _offCtx.shadowOffsetY = 0;
-      _offCtx.shadowColor = 'transparent';
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 4;
+      ctx.shadowOffsetY = 1;
+      ctx.fillText(symbol, tx, y + (w > 100 && h > 64 ? 20 : 16), available);
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.shadowColor = 'transparent';
     }
     
     if (w > 90 && h > 90) {
       const bodyY = y + (w > 100 && h > 64 ? iconSize + 28 : 50);
       const pctSize = Math.min(40, Math.max(16, Math.min(w / 6, h / 8)));
-      _offCtx.font = `600 ${pctSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
-      _offCtx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
-      _offCtx.fillText(pct(change), x + 16, bodyY, w - 32);
-      
-      _offCtx.font = `500 ${Math.min(18, Math.max(11, pctSize * .45))}px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif`;
-      _offCtx.fillStyle = 'rgba(255,255,255,.6)';
-      _offCtx.fillText(`${fmtUsd(token.marketCap || token.fdv)} \u00B7 ${ageLabel(token.pairCreatedAt)}`, x + 16, bodyY + pctSize + 8, w - 32);
+      ctx.font = `600 ${pctSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+      ctx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
+      ctx.fillText(pct(change), x + 16, bodyY, w - 32);
+      ctx.font = `500 ${Math.min(18, Math.max(11, pctSize * .45))}px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif`;
+      ctx.fillStyle = 'rgba(255,255,255,.6)';
+      ctx.fillText(`${fmtUsd(token.marketCap || token.fdv)} \u00B7 ${ageLabel(token.pairCreatedAt)}`, x + 16, bodyY + pctSize + 8, w - 32);
     } else if (w > 54 && h > 64) {
-      _offCtx.font = `600 ${Math.min(18, Math.max(11, w / 6))}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
-      _offCtx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
-      _offCtx.fillText(pct(change), x + 12, y + (w > 100 && h > 64 ? 20 + titleSize + 4 : 40), w - 24);
+      ctx.font = `600 ${Math.min(18, Math.max(11, w / 6))}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+      ctx.fillStyle = change >= 0 ? '#32d74b' : '#ff453a';
+      ctx.fillText(pct(change), x + 12, y + (w > 100 && h > 64 ? 20 + titleSize + 4 : 40), w - 24);
     }
-    _offCtx.restore();
+    ctx.restore();
   }
-  _cacheDirty = false;
-}
-
-function drawCanvas() {
-  // Rebuild offscreen cache if data changed (NOT during pan/zoom)
-  if (_cacheDirty || !_offscreen) rebuildCanvasCache();
-
-  const isMobile = window.innerWidth <= 860;
-  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
-  const bounds = canvas.getBoundingClientRect();
-  const newW = Math.floor(bounds.width * dpr);
-  const newH = Math.floor(bounds.height * dpr);
-  if (canvas.width !== newW || canvas.height !== newH) {
-    canvas.width = newW;
-    canvas.height = newH;
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, bounds.width, bounds.height);
-
-  // Fast blit: just draw the cached offscreen canvas with current pan/zoom transform
-  const world = worldBounds();
-  ctx.save();
-  ctx.translate(state.view.x, state.view.y);
-  ctx.scale(state.view.scale, state.view.scale);
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(_offscreen, 0, 0, world.width, world.height);
   ctx.restore();
 }
 
-function makeIconTexture(token) {
-  const c = document.createElement('canvas');
-  c.width = 160; c.height = 160;
-  const cx = c.getContext('2d');
-  cx.clearRect(0, 0, 160, 160);
-  cx.save();
-  cx.beginPath();
-  cx.arc(80, 80, 74, 0, Math.PI * 2);
-  cx.clip();
-  const img = state.images.get(token.id);
-  if (img) cx.drawImage(img, 0, 0, 160, 160);
-  else {
-    cx.fillStyle = colorFor(metricValue(token));
-    cx.fillRect(0, 0, 160, 160);
-    cx.fillStyle = 'rgba(0,0,0,.2)';
-    cx.font = '800 42px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
-    cx.textAlign = 'center';
-    cx.textBaseline = 'middle';
-    cx.fillText(token.symbol.slice(0, 4), 80, 82);
-  }
-  cx.restore();
-  cx.strokeStyle = 'rgba(255,255,255,.3)';
-  cx.lineWidth = 4;
-  cx.beginPath();
-  cx.arc(80, 80, 74, 0, Math.PI * 2);
-  cx.stroke();
-  return new THREE.CanvasTexture(c);
-}
-
-function initGlobe() {
-  const scene = new THREE.Scene();
-  const distance = 50;
-  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
-  camera.position.z = 10;
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  globeMount.appendChild(renderer.domElement);
-  
-  const root = new THREE.Group();
-  scene.add(root);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  
-  state.globe = { 
-    scene, camera, renderer, root, 
-    items: [], territories: [], 
-    raycaster: new THREE.Raycaster(), 
-    pointer: new THREE.Vector2(), 
-    draggingItem: null, draggingCamera: false, 
-    moved: false, lastX: 0, lastY: 0, distance 
-  };
-  
-  globeMount.addEventListener('pointerdown', e => {
-    state.globe.moved = false;
-    state.globe.lastX = e.clientX;
-    state.globe.lastY = e.clientY;
-    
-    const rect = globeMount.getBoundingClientRect();
-    state.globe.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    state.globe.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    state.globe.raycaster.setFromCamera(state.globe.pointer, state.globe.camera);
-    
-    const hits = state.globe.raycaster.intersectObjects(state.globe.territories, true);
-    if (hits.length) {
-      const obj = hits[0].object;
-      state.globe.draggingItem = state.globe.items.find(i => i.group === obj);
-      if (state.globe.draggingItem) state.globe.draggingItem.dragging = true;
-    } else {
-      state.globe.draggingCamera = true;
-    }
-  });
-  
-  window.addEventListener('pointerup', () => { 
-    if (state.globe) {
-      if (state.globe.draggingItem) state.globe.draggingItem.dragging = false;
-      state.globe.draggingItem = null;
-      state.globe.draggingCamera = false;
-    }
-  });
-  
-  globeMount.addEventListener('pointermove', onGlobeMove);
-  globeMount.addEventListener('wheel', onGlobeWheel, { passive: false });
-  globeMount.addEventListener('click', onGlobeClick);
-  animateGlobe();
-}
-
-function makeTokenBadgeTexture(token, radiusPixels = 256) {
-  const c = document.createElement('canvas');
-  c.width = radiusPixels * 2;
-  c.height = radiusPixels * 2;
-  const cx = c.getContext('2d');
-  const change = metricValue(token);
-  const cxX = radiusPixels, cxY = radiusPixels;
-  
-  cx.clearRect(0, 0, c.width, c.height);
-  cx.fillStyle = change >= 0 ? 'rgba(50, 215, 75, 0.12)' : 'rgba(255, 69, 58, 0.12)';
-  cx.beginPath();
-  cx.arc(cxX, cxY, radiusPixels - 4, 0, Math.PI * 2);
-  cx.fill();
-  
-  cx.strokeStyle = change >= 0 ? 'rgba(50, 215, 75, 0.8)' : 'rgba(255, 69, 58, 0.8)';
-  cx.lineWidth = 4;
-  cx.stroke();
-  
-  const img = state.images.get(token.id);
-  const iconSize = radiusPixels * 0.55;
-  cx.save();
-  cx.beginPath();
-  cx.arc(cxX, cxY - radiusPixels * 0.15, iconSize/2, 0, Math.PI * 2);
-  cx.clip();
-  if (img) {
-    cx.drawImage(img, cxX - iconSize/2, cxY - iconSize/2 - radiusPixels * 0.15, iconSize, iconSize);
-  } else {
-    cx.fillStyle = colorFor(change);
-    cx.fill();
-  }
-  cx.restore();
-  
-  cx.fillStyle = '#fff';
-  cx.font = `600 ${radiusPixels * 0.18}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
-  cx.textAlign = 'center';
-  cx.fillText(token.symbol.slice(0, 12), cxX, cxY + radiusPixels * 0.18);
-  
-  cx.fillStyle = colorFor(change);
-  cx.font = `800 ${radiusPixels * 0.22}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
-  cx.fillText(pct(change), cxX, cxY + radiusPixels * 0.48);
-  
-  // price/mcap label removed — too cluttered at small sizes
-
-  const texture = new THREE.CanvasTexture(c);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-function makeBubble(token, maxVal) {
-  const value = sizeValue(token);
-  // Calculate relative radius (area proportional to value)
-  const ratio = maxVal > 0 ? Math.sqrt(value / maxVal) : 0;
-  // Scale up bubble radius on mobile so they fill the smaller viewport
-  const isMobile = window.innerWidth <= 860;
-  const minR = isMobile ? 5 : 3;
-  const maxR = isMobile ? 26 : 17;
-  const radius = minR + ratio * maxR;
-  
-  const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({ map: makeTokenBadgeTexture(token, 256), transparent: true })
-  );
-  sprite.scale.set(radius * 2, radius * 2, 1);
-  sprite.userData.token = token;
-  
-  return { group: sprite, r: radius, v: new THREE.Vector3(), dragging: false };
-}
-
-function rebuildGlobe() {
-  if (!state.globe) initGlobe();
-  state.globe.renderer.setClearColor(0x000000, 0);
-  
-  for (const item of state.globe.items) {
-    if (item.group.material.map) item.group.material.map.dispose();
-    if (item.group.material) item.group.material.dispose();
-    state.globe.root.remove(item.group);
-  }
-  state.globe.items = [];
-  state.globe.territories = [];
-  
+// â”€â”€ Table view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+function renderTable() {
   const tokens = visibleTokens();
-  if (tokens.length === 0) return;
-  
-  let maxVal = 0;
-  for (const t of tokens) maxVal = Math.max(maxVal, sizeValue(t));
-  
-  let totalArea = 0;
-  for (const t of tokens) {
-    const val = sizeValue(t);
-    const ratio = maxVal > 0 ? Math.sqrt(val / maxVal) : 0;
-    const r = 3 + ratio * 17;
-    totalArea += Math.PI * r * r;
-  }
-  
-  const b = globeMount.getBoundingClientRect();
-  const aspect = b.width / Math.max(1, b.height);
-  let optimalDistance = Math.sqrt(totalArea / (0.25 * aspect));
-  state.globe.distance = Math.max(30, Math.min(300, optimalDistance));
-  
-  // Scatter bubbles across the top half so they rain down naturally
-  const viewW = state.globe.distance * aspect;
-  for (let i = 0; i < tokens.length; i++) {
-    const bubble = makeBubble(tokens[i], maxVal);
-    const x = (Math.random() - 0.5) * viewW * 0.85;
-    const y = Math.random() * state.globe.distance * 0.4 + state.globe.distance * 0.1;
-    bubble.group.position.set(x, y, 0);
-    state.globe.root.add(bubble.group);
-    state.globe.items.push(bubble);
-    state.globe.territories.push(bubble.group);
-  }
-  
-  resizeGlobe();
-}
 
-function animateGlobe() {
-  if (!state.globe) return;
-  requestAnimationFrame(animateGlobe);
-
-  // Throttle to ~30fps on mobile to save battery/CPU
-  const isMobile = window.innerWidth <= 860;
-  if (isMobile) {
-    const now = performance.now();
-    if (!state.globe._lastFrame) state.globe._lastFrame = 0;
-    if (now - state.globe._lastFrame < 32) return; // ~30fps
-    state.globe._lastFrame = now;
+  if (tokens.length === 0) {
+    tokenTable.innerHTML = `<div class="tbl-empty">No tokens match your filters.</div>`;
+    return;
   }
 
-  const items = state.globe.items || [];
-  const cam = state.globe.camera;
-  const floorY = cam.bottom + cam.position.y + 0.5;
-  const leftWall = cam.left + cam.position.x + 0.5;
-  const rightWall = cam.right + cam.position.x - 0.5;
-  
-  const GRAVITY = -0.015;
-  const DAMPING = 0.995;
-  const FLOOR_BOUNCE = 0.45;
-  const SEPARATION_STRENGTH = 0.4;
-  
-  // --- Apply forces ---
-  for (let i = 0; i < items.length; i++) {
-    const a = items[i];
-    if (a.dragging) continue;
-    
-    // Gravity
-    a.v.y += GRAVITY;
-    
-    // Very light air friction — momentum sustains
-    a.v.x *= DAMPING;
-    a.v.y *= DAMPING;
-    
-    // Clamp max speed
-    const speed = Math.sqrt(a.v.x * a.v.x + a.v.y * a.v.y);
-    const maxSpeed = 2.5;
-    if (speed > maxSpeed) {
-      a.v.x = (a.v.x / speed) * maxSpeed;
-      a.v.y = (a.v.y / speed) * maxSpeed;
-    }
-    
-    // Integrate position
-    a.group.position.x += a.v.x;
-    a.group.position.y += a.v.y;
-    
-    // Floor collision
-    if (a.group.position.y - a.r < floorY) {
-      a.group.position.y = floorY + a.r;
-      if (a.v.y < 0) a.v.y *= -FLOOR_BOUNCE;
-      a.v.x *= 0.97;
-    }
-    
-    // Side wall collisions
-    if (a.group.position.x - a.r < leftWall) {
-      a.group.position.x = leftWall + a.r;
-      if (a.v.x < 0) a.v.x *= -FLOOR_BOUNCE;
-    }
-    if (a.group.position.x + a.r > rightWall) {
-      a.group.position.x = rightWall - a.r;
-      if (a.v.x > 0) a.v.x *= -FLOOR_BOUNCE;
-    }
-  }
-  
-  // --- Collision resolution (position-only, no impulse explosions) ---
-  for (let iter = 0; iter < 3; iter++) {
-    for (let i = 0; i < items.length; i++) {
-      const a = items[i];
-      for (let j = i + 1; j < items.length; j++) {
-        const b = items[j];
-        const dx = a.group.position.x - b.group.position.x;
-        const dy = a.group.position.y - b.group.position.y;
-        const distSq = dx * dx + dy * dy;
-        const minDist = a.r + b.r;
-        
-        if (distSq < minDist * minDist && distSq > 0.0001) {
-          const dist = Math.sqrt(distSq);
-          const overlap = minDist - dist;
-          const nx = dx / dist;
-          const ny = dy / dist;
-          
-          // Mass-weighted push-apart
-          const massA = a.r * a.r;
-          const massB = b.r * b.r;
-          const total = massA + massB;
-          const pushA = a.dragging ? 0 : (b.dragging ? 1 : massB / total);
-          const pushB = b.dragging ? 0 : (a.dragging ? 1 : massA / total);
-          
-          const push = overlap * SEPARATION_STRENGTH;
-          a.group.position.x += nx * push * pushA;
-          a.group.position.y += ny * push * pushA;
-          b.group.position.x -= nx * push * pushB;
-          b.group.position.y -= ny * push * pushB;
-          
-          // Transfer real velocity on collision
-          if (a.dragging && !b.dragging) {
-            // Dragged bubble hitting b — give b the dragged bubble's speed along collision normal
-            const hitSpeed = Math.abs(a.v.x * nx + a.v.y * ny);
-            const kick = Math.max(hitSpeed * 0.6, overlap * 0.05);
-            b.v.x -= nx * kick;
-            b.v.y -= ny * kick;
-          } else if (b.dragging && !a.dragging) {
-            const hitSpeed = Math.abs(b.v.x * nx + b.v.y * ny);
-            const kick = Math.max(hitSpeed * 0.6, overlap * 0.05);
-            a.v.x += nx * kick;
-            a.v.y += ny * kick;
-          } else {
-            // Normal bubble-to-bubble: transfer momentum
-            const nudge = overlap * 0.12;
-            if (!a.dragging) {
-              a.v.x += nx * nudge;
-              a.v.y += ny * nudge;
-            }
-            if (!b.dragging) {
-              b.v.x -= nx * nudge;
-              b.v.y -= ny * nudge;
-            }
-          }
-        }
-      }
-    }
-  }
-  
-  state.globe.renderer.render(state.globe.scene, state.globe.camera);
-}
+  const col = (val, metric) => {
+    if (!Number.isFinite(val)) return `<td class="tbl-chg">-</td>`;
+    const cls = val >= 0 ? 'up' : 'down';
+    const active = state.metric === metric ? ' tbl-active-col' : '';
+    return `<td class="tbl-chg ${cls}${active}">${pct(val)}</td>`;
+  };
 
-function resizeGlobe() {
-  if (!state.globe) return;
-  const b = globeMount.getBoundingClientRect();
-  const aspect = b.width / Math.max(1, b.height);
-  const viewHeight = state.globe.distance;
-  const viewWidth = viewHeight * aspect;
-  
-  state.globe.camera.left = -viewWidth / 2;
-  state.globe.camera.right = viewWidth / 2;
-  state.globe.camera.top = viewHeight / 2;
-  state.globe.camera.bottom = -viewHeight / 2;
-  state.globe.camera.updateProjectionMatrix();
-  state.globe.renderer.setSize(b.width, b.height);
-}
+  const rows = tokens.map((token, i) => {
+    const imgUrl = token.displayImageUrl || state.imageUrls.get(token.id) || token.imageUrl || '';
+    const avatar = imgUrl
+      ? `<img src="${imgUrl}" alt="" class="tbl-logo" loading="lazy" onerror="this.style.display='none'">`
+      : `<span class="tbl-logo tbl-logo-placeholder">${token.symbol.slice(0,2)}</span>`;
+    const mc = token.marketCap || token.fdv;
+    const selected = state.selected?.id === token.id ? ' tbl-row-selected' : '';
+    return `
+      <tr class="tbl-row${selected}" data-id="${token.id}" tabindex="0">
+        <td class="tbl-rank">${i + 1}</td>
+        <td class="tbl-token">
+          ${avatar}
+          <div class="tbl-names">
+            <span class="tbl-sym">${token.symbol}</span>
+            <span class="tbl-name">${token.name.slice(0, 20)}</span>
+          </div>
+        </td>
+        ${col(token.priceChange?.m5, 'm5')}
+        ${col(token.priceChange?.h1, 'h1')}
+        ${col(token.priceChange?.h6, 'h6')}
+        ${col(token.priceChange?.h24, 'h24')}
+        <td class="tbl-mc">${fmtUsd(mc)}</td>
+      </tr>`;
+  }).join('');
 
-function onGlobeWheel(e) {
-  e.preventDefault();
-  state.globe.distance = Math.min(200, Math.max(15, state.globe.distance + Math.sign(e.deltaY) * 2));
-  resizeGlobe();
-}
+  tokenTable.innerHTML = `
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th class="tbl-rank">#</th>
+          <th class="tbl-token">Token</th>
+          <th class="tbl-chg${state.metric === 'm5' ? ' tbl-active-col' : ''}">5m</th>
+          <th class="tbl-chg${state.metric === 'h1' ? ' tbl-active-col' : ''}">1h</th>
+          <th class="tbl-chg${state.metric === 'h6' ? ' tbl-active-col' : ''}">6h</th>
+          <th class="tbl-chg${state.metric === 'h24' ? ' tbl-active-col' : ''}">24h</th>
+          <th class="tbl-mc">MCap</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 
-function pickGlobe(e) {
-  const rect = globeMount.getBoundingClientRect();
-  state.globe.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  state.globe.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  state.globe.raycaster.setFromCamera(state.globe.pointer, state.globe.camera);
-  const hits = state.globe.raycaster.intersectObjects(state.globe.territories, true);
-  return hits.find(hit => hit.object.userData.token)?.object.userData.token || null;
+  // Row click â†’ select token (drawer)
+  tokenTable.querySelectorAll('.tbl-row').forEach(row => {
+    const id = row.dataset.id;
+    const token = tokens.find(t => t.id === id);
+    if (!token) return;
+    row.addEventListener('click', () => selectToken(token));
+    row.addEventListener('keydown', e => { if (e.key === 'Enter') selectToken(token); });
+  });
 }
+// â”€â”€ End table view â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function onGlobeMove(e) {
-  if (!state.globe) return;
-  const rect = globeMount.getBoundingClientRect();
-  state.globe.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  state.globe.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-  
-  if (state.globe.draggingItem) {
-    const vec = new THREE.Vector3(state.globe.pointer.x, state.globe.pointer.y, 0);
-    vec.unproject(state.globe.camera);
-    state.globe.draggingItem.v.x = (vec.x - state.globe.draggingItem.group.position.x) * 0.4;
-    state.globe.draggingItem.v.y = (vec.y - state.globe.draggingItem.group.position.y) * 0.4;
-    state.globe.draggingItem.group.position.x = vec.x;
-    state.globe.draggingItem.group.position.y = vec.y;
-    state.globe.moved = true;
-  } else if (state.globe.draggingCamera) {
-    const dx = e.clientX - state.globe.lastX;
-    const dy = e.clientY - state.globe.lastY;
-    if (Math.abs(dx) + Math.abs(dy) > 2) state.globe.moved = true;
-    
-    const v1 = new THREE.Vector3(0, 0, 0).unproject(state.globe.camera);
-    const v2 = new THREE.Vector3(dx / rect.width * 2, -dy / rect.height * 2, 0).unproject(state.globe.camera);
-    state.globe.camera.position.x -= (v2.x - v1.x);
-    state.globe.camera.position.y -= (v2.y - v1.y);
-  }
-  
-  state.globe.lastX = e.clientX;
-  state.globe.lastY = e.clientY;
-  showHover(pickGlobe(e), e.clientX, e.clientY);
-}
 
-function onGlobeClick(e) {
-  if (state.globe.moved) return;
-  const token = pickGlobe(e);
-  if (token) selectToken(token);
-}
+
+
 
 function showHover(token, x, y) {
   if (!token) { hoverTag.hidden = true; return; }
@@ -1064,7 +714,7 @@ function selectToken(token) {
   }).join('');
 
   drawer.innerHTML = `
-    <button class="close" aria-label="Close">✕</button>
+    <button class="close" aria-label="Close">âœ•</button>
     <div class="tokenHead">
       <div class="avatar">${imageUrl ? `<img src="${imageUrl}" alt="">` : token.symbol.slice(0, 3)}</div>
       <div>
@@ -1146,10 +796,6 @@ function bindControls() {
     state.view = { ...state.view, scale: 1, x: 0, y: 0 };
     state.minMarketCap = 0;
     document.querySelector('#minMc').value = '';
-    if (state.globe) {
-      state.globe.distance = 50;
-      state.globe.camera.position.set(0, 0, 10);
-    }
     render();
   });
   canvas.addEventListener('wheel', e => {
@@ -1178,7 +824,7 @@ function bindControls() {
     const ids = Object.keys(_touches);
 
     if (ids.length === 2) {
-      // Starting a pinch — record world-space anchor at current midpoint
+      // Starting a pinch â€” record world-space anchor at current midpoint
       const t1 = _touches[ids[0]], t2 = _touches[ids[1]];
       _pinchDist0 = Math.hypot(t2.x - t1.x, t2.y - t1.y);
       _pinchScale0 = state.view.scale;
@@ -1197,7 +843,7 @@ function bindControls() {
     _touchMoved = false;
   }, { passive: false });
 
-  // rAF flag — ensures drawCanvas fires at most once per animation frame
+  // rAF flag â€” ensures drawCanvas fires at most once per animation frame
   let _rafPending = false;
   function _scheduleCanvasDraw() {
     if (_rafPending) return;
@@ -1245,7 +891,7 @@ function bindControls() {
     _pinchDist0 = null;
 
     if (ids.length === 1) {
-      // 2→1 finger: reset pan origin to remaining finger so there's no jump
+      // 2â†’1 finger: reset pan origin to remaining finger so there's no jump
       const remaining = _touches[ids[0]];
       state.view.lastX = remaining.x;
       state.view.lastY = remaining.y;
@@ -1299,14 +945,14 @@ function bindControls() {
 function render() {
   statusEl.textContent = `${visibleTokens().length}/${state.tokens.length} tokens`;
   const isCanvas = state.mode === 'canvas';
-  canvas.hidden = !isCanvas;
-  globeMount.hidden = isCanvas;
+  const isTable  = state.mode === 'table';
+  canvas.hidden     = !isCanvas;
+  tokenTable.hidden = !isTable;
   if (isCanvas) {
-    invalidateCanvasCache(); // data/filter/metric changed — rebuild offscreen on next draw
+    invalidateCanvasCache();
     drawCanvas();
-  } else {
-    rebuildGlobe();
-    requestAnimationFrame(() => state.globe?.renderer.render(state.globe.scene, state.globe.camera));
+  } else if (isTable) {
+    renderTable();
   }
 }
 
