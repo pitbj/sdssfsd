@@ -62,7 +62,7 @@ document.querySelector('#app').innerHTML = `
           <button data-value="h6">6h</button>
           <button class="active" data-value="h24">24h</button>
         </div>
-        <label class="field">min mc <input id="minMc" inputmode="numeric" placeholder="0"></label>
+        <label class="field"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg><input id="minMc" inputmode="numeric" placeholder="Min MC"></label>
         <div class="dropdown" id="filterWrap">
           <button class="dropdown-toggle" id="filterBtn">🔥 Top Gainers<svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <div class="dropdown-menu" id="filterMenu">
@@ -390,7 +390,11 @@ function visibleTokens() {
   else if (f === 'volume') tokens.sort((a, b) => (b.volume24h || 0) - (a.volume24h || 0));
   else if (f === 'liquidity') tokens.sort((a, b) => (b.liquidity || 0) - (a.liquidity || 0));
   else tokens.sort((a, b) => metricValue(b) - metricValue(a));
-  return tokens.slice(0, state.mode === 'globe' ? 28 : 26);
+  const isMobile = window.innerWidth <= 860;
+  // Fewer tiles on mobile = faster treemap + less canvas drawing
+  const maxCanvas = isMobile ? 16 : 26;
+  const maxGlobe  = isMobile ? 20 : 28;
+  return tokens.slice(0, state.mode === 'globe' ? maxGlobe : maxCanvas);
 }
 
 function layoutTreemap(items, x, y, w, h) {
@@ -424,8 +428,12 @@ function layoutTreemap(items, x, y, w, h) {
 
 function worldBounds() {
   const rect = canvas.getBoundingClientRect();
-  const width = Math.max(1600, rect.width * 1.8);
-  const height = Math.max(1050, rect.height * 1.8);
+  const isMobile = window.innerWidth <= 860;
+  // On mobile, world is only slightly larger than the viewport so tiles stay visible
+  const minW = isMobile ? rect.width * 1.2 : 1600;
+  const minH = isMobile ? rect.height * 1.2 : 1050;
+  const width = Math.max(minW, rect.width * (isMobile ? 1.3 : 1.8));
+  const height = Math.max(minH, rect.height * (isMobile ? 1.3 : 1.8));
   return { width, height };
 }
 
@@ -477,13 +485,14 @@ function fitText(text, maxWidth, maxSize, minSize = 10) {
 }
 
 function drawCanvas() {
-  const dpr = window.devicePixelRatio || 1;
+  // Cap DPR at 1.5 on mobile — 3x screens draw 4.5x pixels, causes major lag
+  const isMobile = window.innerWidth <= 860;
+  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
   const bounds = canvas.getBoundingClientRect();
   canvas.width = Math.floor(bounds.width * dpr);
   canvas.height = Math.floor(bounds.height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, bounds.width, bounds.height);
-
   const world = worldBounds();
   const tokens = visibleTokens();
   const items = tokens.map(token => ({ token, weight: sizeValue(token) })).sort((a, b) => b.weight - a.weight);
@@ -715,8 +724,11 @@ function makeBubble(token, maxVal) {
   const value = sizeValue(token);
   // Calculate relative radius (area proportional to value)
   const ratio = maxVal > 0 ? Math.sqrt(value / maxVal) : 0;
-  // Radius scales from 1.5 (smallest) up to 12 (largest)
-  const radius = 3 + ratio * 17;
+  // Scale up bubble radius on mobile so they fill the smaller viewport
+  const isMobile = window.innerWidth <= 860;
+  const minR = isMobile ? 5 : 3;
+  const maxR = isMobile ? 26 : 17;
+  const radius = minR + ratio * maxR;
   
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({ map: makeTokenBadgeTexture(token, 256), transparent: true })
@@ -775,7 +787,17 @@ function rebuildGlobe() {
 
 function animateGlobe() {
   if (!state.globe) return;
-  
+  requestAnimationFrame(animateGlobe);
+
+  // Throttle to ~30fps on mobile to save battery/CPU
+  const isMobile = window.innerWidth <= 860;
+  if (isMobile) {
+    const now = performance.now();
+    if (!state.globe._lastFrame) state.globe._lastFrame = 0;
+    if (now - state.globe._lastFrame < 32) return; // ~30fps
+    state.globe._lastFrame = now;
+  }
+
   const items = state.globe.items || [];
   const cam = state.globe.camera;
   const floorY = cam.bottom + cam.position.y + 0.5;
@@ -889,7 +911,6 @@ function animateGlobe() {
   }
   
   state.globe.renderer.render(state.globe.scene, state.globe.camera);
-  requestAnimationFrame(animateGlobe);
 }
 
 function resizeGlobe() {
@@ -1084,19 +1105,106 @@ function bindControls() {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     const before = screenToWorld(mx, my);
-    state.view.scale = Math.min(5, Math.max(.55, state.view.scale * (e.deltaY < 0 ? 1.14 : .88)));
+    state.view.scale = Math.min(5, Math.max(.25, state.view.scale * (e.deltaY < 0 ? 1.14 : .88)));
     state.view.x = mx - before.x * state.view.scale;
     state.view.y = my - before.y * state.view.scale;
     drawCanvas();
   }, { passive: false });
+
+  // --- Touch pinch-to-zoom for canvas ---
+  let _touches = {};
+  let _pinchDist0 = null;
+  let _pinchScale0 = null;
+  let _pinchMidX = 0, _pinchMidY = 0;
+  let _pinchWorldX = 0, _pinchWorldY = 0;
+  let _touchMoved = false;
+
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) _touches[t.identifier] = { x: t.clientX, y: t.clientY };
+    const ids = Object.keys(_touches);
+    if (ids.length === 2) {
+      const t1 = _touches[ids[0]], t2 = _touches[ids[1]];
+      _pinchDist0 = Math.hypot(t2.x - t1.x, t2.y - t1.y);
+      _pinchScale0 = state.view.scale;
+      const rect = canvas.getBoundingClientRect();
+      _pinchMidX = (t1.x + t2.x) / 2 - rect.left;
+      _pinchMidY = (t1.y + t2.y) / 2 - rect.top;
+      const world = screenToWorld(_pinchMidX, _pinchMidY);
+      _pinchWorldX = world.x;
+      _pinchWorldY = world.y;
+    }
+    _touchMoved = false;
+    state.view.dragging = ids.length === 1;
+    if (ids.length === 1) {
+      state.view.lastX = e.changedTouches[0].clientX;
+      state.view.lastY = e.changedTouches[0].clientY;
+    }
+  }, { passive: false });
+
+  // rAF flag — ensures drawCanvas fires at most once per animation frame
+  let _rafPending = false;
+  function _scheduleCanvasDraw() {
+    if (_rafPending) return;
+    _rafPending = true;
+    requestAnimationFrame(() => { _rafPending = false; drawCanvas(); });
+  }
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) _touches[t.identifier] = { x: t.clientX, y: t.clientY };
+    const ids = Object.keys(_touches);
+    _touchMoved = true;
+    if (ids.length === 2) {
+      // Pinch zoom — update state immediately, draw once per frame
+      const t1 = _touches[ids[0]], t2 = _touches[ids[1]];
+      const dist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
+      if (_pinchDist0 && _pinchDist0 > 0) {
+        const newScale = Math.min(5, Math.max(.25, _pinchScale0 * (dist / _pinchDist0)));
+        state.view.scale = newScale;
+        state.view.x = _pinchMidX - _pinchWorldX * newScale;
+        state.view.y = _pinchMidY - _pinchWorldY * newScale;
+        _scheduleCanvasDraw();
+      }
+    } else if (ids.length === 1 && state.view.dragging) {
+      // Single finger pan
+      const t = e.changedTouches[0];
+      state.view.x += t.clientX - state.view.lastX;
+      state.view.y += t.clientY - state.view.lastY;
+      state.view.lastX = t.clientX;
+      state.view.lastY = t.clientY;
+      _scheduleCanvasDraw();
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) delete _touches[t.identifier];
+    const ids = Object.keys(_touches);
+    state.view.dragging = ids.length === 1;
+    if (!_touchMoved && e.changedTouches.length === 1) {
+      // Tap to select
+      const t = e.changedTouches[0];
+      const hit = canvasHit(t.clientX, t.clientY);
+      if (hit) selectToken(hit.token);
+    }
+    _pinchDist0 = null;
+  }, { passive: false });
+  // --- End touch pinch-to-zoom ---
+
   canvas.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'touch') return; // handled by touch events
     state.view.dragging = true;
     state.view.lastX = e.clientX;
     state.view.lastY = e.clientY;
     canvas.setPointerCapture(e.pointerId);
   });
-  canvas.addEventListener('pointerup', () => { state.view.dragging = false; });
+  canvas.addEventListener('pointerup', e => {
+    if (e.pointerType === 'touch') return;
+    state.view.dragging = false;
+  });
   canvas.addEventListener('pointermove', e => {
+    if (e.pointerType === 'touch') return;
     if (state.view.dragging) {
       state.view.x += e.clientX - state.view.lastX;
       state.view.y += e.clientY - state.view.lastY;
@@ -1111,6 +1219,7 @@ function bindControls() {
   });
   canvas.addEventListener('mouseleave', () => { hoverTag.hidden = true; });
   canvas.addEventListener('click', e => {
+    if (e.pointerType === 'touch') return;
     if (Math.abs(e.clientX - state.view.lastX) > 3 || Math.abs(e.clientY - state.view.lastY) > 3) return;
     const hit = canvasHit(e.clientX, e.clientY);
     if (hit) selectToken(hit.token);
